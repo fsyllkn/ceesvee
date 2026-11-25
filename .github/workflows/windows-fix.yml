@@ -1,0 +1,58 @@
+name: CEESVEE Windows fix
+
+on:
+  push:
+    branches: [fix]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ceesvee-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Run frontend tests including the startup regression
+        run: npm test
+      - name: Build Windows installers
+        shell: pwsh
+        run: |
+          '{"bundle":{"createUpdaterArtifacts":false}}' | Set-Content -Encoding utf8NoBOM ci-tauri-config.json
+          npm run tauri -- build --ci --bundles nsis,msi --config ci-tauri-config.json
+      - name: Collect installers and checksums
+        shell: pwsh
+        run: |
+          $exe = @(Get-ChildItem src-tauri/target/release/bundle/nsis -Filter '*-setup.exe' -File)
+          $msi = @(Get-ChildItem src-tauri/target/release/bundle/msi -Filter '*.msi' -File)
+          if ($exe.Count -ne 1 -or $msi.Count -ne 1) { throw 'Expected one EXE and one MSI.' }
+          New-Item -ItemType Directory -Path windows-installers | Out-Null
+          Copy-Item -LiteralPath ($exe[0].FullName) -Destination windows-installers
+          Copy-Item -LiteralPath ($msi[0].FullName) -Destination windows-installers
+          Get-ChildItem windows-installers -File | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
+          } | Set-Content -Encoding ascii windows-installers/SHA256SUMS.txt
+      - name: Upload Windows installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: CEESVEE-fix-Windows-x64
+          path: windows-installers/
+          if-no-files-found: error
+          retention-days: 30
